@@ -11,3 +11,7 @@ class SetTTLModel(BaseModel):
     key: str
     value: str
     ttl: int
+    
+class SetScoreModel(BaseModel):
+    user_id: str
+    score: str
