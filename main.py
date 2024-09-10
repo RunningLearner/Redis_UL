@@ -1,4 +1,7 @@
+import asyncio
+import random
 from fastapi import BackgroundTasks, Depends, FastAPI
+from redis import RedisError
 import redis.asyncio as aioredis
 from contextlib import asynccontextmanager
 
@@ -220,3 +223,59 @@ async def get_user(
         return {"source": "Database", "data": {"id": user.id, "name": user.name}}
 
     return {"message": "User not found"}
+
+
+# 동시성 처리
+@app.put("/simulate_concurrent_update")
+async def simulate_concurrent_update(
+    body: SetScoreModel,
+    background_tasks: BackgroundTasks,
+    redis: aioredis.Redis = Depends(get_redis),
+):
+    # 한번의 요청에 대해 여러 작업을 병렬로 실행
+    tasks = []
+
+    # 의도적으로 5개의 비동기 작업을 생성하여 동시 실행
+    for i in range(5):
+        # 각 작업에서 약간 다른 점수 변경을 시도
+        tasks.append(
+            update_score_concurrently(body.user_id, random.randint(1, 10), redis)
+        )
+
+    # 모든 작업을 병렬로 실행
+    await asyncio.gather(*tasks)
+
+    return {"message": "동시성 업데이트 시뮬레이션 완료"}
+
+
+# 사용자 점수 업데이트 로직 (의도적으로 동시성 문제를 발생)
+async def update_score_concurrently(user_id: str, score: int, redis: aioredis.Redis):
+    while True:  # 트랜잭션이 성공할 때까지 재시도
+        try:
+            async with redis.pipeline(transaction=True) as pipe:
+                # WATCH 명령어로 충돌 감지: 사용자 점수를 감시
+                await pipe.watch(f"user:{user_id}:score")
+
+                # 현재 사용자 점수 가져오기
+                current_score = await redis.get(f"user:{user_id}:score")
+                current_score = int(current_score or 0)
+
+                # 새로운 점수 계산
+                new_score = current_score + score
+
+                # 트랜잭션 시작
+                pipe.multi()
+
+                # 새로운 점수로 업데이트
+                await pipe.set(f"user:{user_id}:score", new_score)
+
+                # EXEC으로 트랜잭션 실행
+                await pipe.execute()
+
+                print(f"사용자 {user_id}의 점수가 {new_score}로 업데이트 되었습니다.")
+                break  # 성공적으로 업데이트 되었으면 루프 종료
+
+        except RedisError:
+            # 다른 클라이언트가 데이터를 수정하여 WATCH가 충돌한 경우
+            print(f"충돌 감지! 사용자 {user_id}의 점수 업데이트 재시도...")
+            continue  # 충돌 시 트랜잭션을 다시 시도
