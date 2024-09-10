@@ -15,3 +15,7 @@ class SetTTLModel(BaseModel):
 class SetScoreModel(BaseModel):
     user_id: str
     score: str
+
+class SetLikedModel(BaseModel):
+    user_id: str
+    liked_tag: str
