@@ -1,4 +1,4 @@
-from fastapi import Depends, FastAPI
+from fastapi import BackgroundTasks, Depends, FastAPI
 import redis.asyncio as aioredis
 from contextlib import asynccontextmanager
 
@@ -167,45 +167,31 @@ async def update_user(
 
 
 # 사용자가 최근에 좋아요를 누른 tag (Redis와 DB 동기화)
-# Cache-Aside 패턴
-@app.put("/liked_tag_ca")
-async def update_user(
-    body: SetLikedModel,
-    db: AsyncSession = Depends(get_db),
-    redis: aioredis.Redis = Depends(get_redis),
-):
-    # Redis에 캐시 업데이트
-    await redis.hset(f"user:{body.user_id}", mapping={"liked_tag": body.liked_tag})
-
-    query = text("UPDATE users SET liked_tag = :liked_tag WHERE id = :user_id")
-    # 데이터베이스에 동기화
-    result = await db.execute(
-        query, {"liked_tag": body.liked_tag, "user_id": body.user_id}
-    )
-    await db.commit()
-
-    return {"message": f"{body.user_id}님이 좋아한 최근 태그 {body.liked_tag}"}
-
-
-# 사용자가 최근에 좋아요를 누른 tag (Redis와 DB 동기화)
 # Write-Behind 패턴
-@app.put("/liked_tag_ca")
+@app.put("/liked_tag_wb")
 async def update_user(
     body: SetLikedModel,
+    background_tasks: BackgroundTasks,
     db: AsyncSession = Depends(get_db),
     redis: aioredis.Redis = Depends(get_redis),
 ):
     # Redis에 캐시 업데이트
     await redis.hset(f"user:{body.user_id}", mapping={"liked_tag": body.liked_tag})
 
-    query = text("UPDATE users SET liked_tag = :liked_tag WHERE id = :user_id")
-    # 데이터베이스에 동기화
-    result = await db.execute(
-        query, {"liked_tag": body.liked_tag, "user_id": body.user_id}
-    )
-    await db.commit()
+    # 백그라운드에서 비동기적으로 데이터베이스에 동기화
+    background_tasks.add_task(sync_to_db, body, db)
 
-    return {"message": f"{body.user_id}님이 좋아한 최근 태그 {body.liked_tag}"}
+    return {
+        "message": f"{body.user_id}님이 좋아한 최근 태그 {body.liked_tag}가 캐시에 저장되었습니다."
+    }
+
+
+# Redis에 캐시된 데이터를 비동기로 DB에 동기화하는 함수
+# Write-Behind 패턴
+async def sync_to_db(body: SetLikedModel, db: AsyncSession):
+    query = text("UPDATE users SET liked_tag = :liked_tag WHERE id = :user_id")
+    await db.execute(query, {"liked_tag": body.liked_tag, "user_id": body.user_id})
+    await db.commit()
 
 
 # 사용자 데이터 조회 엔드포인트 (캐시 조회 및 데이터베이스 조회)
@@ -222,6 +208,7 @@ async def get_user(
         return {"source": "Redis", "data": cached_user}
 
     # Redis에 데이터가 없다면, 데이터베이스에서 조회
+    # cahce aside로 캐시미스를 대처
     result = await db.execute(
         "SELECT id, name FROM users WHERE id = :user_id", {"user_id": user_id}
     )
